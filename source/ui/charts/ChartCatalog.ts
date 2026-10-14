@@ -458,12 +458,21 @@ export class ChartCatalog {
 		}
 	}
 
+	/**
+	 * The calendar year, including the progress through it.
+	 *
+	 * During a temporal paradox, the day counts up from a negative number to 0
+	 * at the start of a season. Those days don't move the calendar forward,
+	 * so they are counted as day 0. Otherwise, the year would appear to jump
+	 * backwards when a paradox begins.
+	 */
 	calendarYear() {
 		const calendar = this._host.game.calendar;
 		const daysPerYear = calendar.daysPerSeason * calendar.seasonsPerYear;
 		return (
 			calendar.year +
-			(calendar.season * calendar.daysPerSeason + calendar.day) / daysPerYear
+			(calendar.season * calendar.daysPerSeason + Math.max(0, calendar.day)) /
+				daysPerYear
 		);
 	}
 

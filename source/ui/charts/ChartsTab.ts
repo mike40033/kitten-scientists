@@ -259,9 +259,11 @@ export class ChartsTab {
 			const playedYears = this._catalog.playedYears();
 			const history = this._history;
 			const length = history.length;
+			// A reset or loading an older save takes the calendar back by whole
+			// years. Smaller wobbles are not a reason to throw history away.
 			if (
 				0 < length &&
-				(calendarYear < history.calendarYear[length - 1] - 0.01 ||
+				(calendarYear < history.calendarYear[length - 1] - 1 ||
 					playedYears < history.playedYears[length - 1] - 0.01)
 			) {
 				// The game was reset, or an older save was loaded.
