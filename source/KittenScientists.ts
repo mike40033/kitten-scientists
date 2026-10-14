@@ -10,6 +10,7 @@ import { cl } from "./tools/Log.js";
 import type { GamePage } from "./types/game.js";
 import type { I18nEngine, Locale } from "./types/index.js";
 import { UserScriptLoader } from "./UserScriptLoader.js";
+import { ChartsTab } from "./ui/ChartsTab.js";
 import { UserInterface } from "./ui/UserInterface.js";
 import "iterator-helpers-polyfill";
 
@@ -44,6 +45,7 @@ export class KittenScientists {
 	readonly i18nEngine: I18nEngine;
 
 	private _userInterface: UserInterface;
+	private _chartsTab: ChartsTab;
 	engine: Engine;
 
 	private _gameBeforeSaveHandle: ["game/beforesave", number] | undefined;
@@ -72,6 +74,7 @@ export class KittenScientists {
 		try {
 			this.engine = new Engine(this, gameLanguage);
 			this._userInterface = new UserInterface(this);
+			this._chartsTab = new ChartsTab(this);
 		} catch (error: unknown) {
 			console.error(...cl("Failed to construct core components.", error));
 			throw error;
@@ -122,6 +125,7 @@ export class KittenScientists {
 		console.warn(...cl("Unloading Kitten Scientists..."));
 		this.engine.stop();
 		this._userInterface.destroy();
+		this._chartsTab.destroy();
 		$("#ks-styles").remove();
 		if (this._gameBeforeSaveHandle !== undefined) {
 			UserScriptLoader.window.dojo.unsubscribe(this._gameBeforeSaveHandle);
@@ -148,6 +152,8 @@ export class KittenScientists {
 		if (this.engine.settings.enabled) {
 			this.engine.start(true);
 		}
+
+		this._chartsTab.start();
 
 		this.engine.imessage("status.ks.init");
 
