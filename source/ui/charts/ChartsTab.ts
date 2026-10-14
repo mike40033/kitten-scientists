@@ -282,9 +282,9 @@ export class ChartsTab {
 		if (recording) {
 			this._startSampling();
 		} else {
-			// Free the memory. Nobody is going to look at stale history.
+			// Pause. The history stays, and the pause shows up as a gap.
 			this._stopSampling();
-			this._history.clear();
+			this._history.pause();
 		}
 		this._refreshPicker(true);
 		this.render();
@@ -1043,24 +1043,44 @@ export class ChartsTab {
 					? 1
 					: 0.55;
 			context.lineJoin = "round";
-			context.beginPath();
-			let penDown = false;
+			// Stretches where recording was paused are drawn dashed.
+			const solid = new Path2D();
+			const dashed = new Path2D();
+			let previous: [number, number, number] | undefined;
 			for (let index = 0; index < times.length; ++index) {
 				const fraction = scale.project(values[index]);
 				if (!Number.isFinite(fraction)) {
-					penDown = false;
+					previous = undefined;
 					continue;
 				}
-				const x = toX(xOf(times[index]));
+				const time = times[index];
+				const x = toX(xOf(time));
 				const y = toY(fraction);
-				if (penDown) {
-					context.lineTo(x, y);
-				} else {
-					context.moveTo(x, y);
-					penDown = true;
+				if (previous === undefined) {
+					solid.moveTo(x, y);
+					previous = [time, x, y];
+					continue;
 				}
+				const [t0, , y0] = previous;
+				const at = (t: number): [number, number] => [
+					toX(xOf(t)),
+					y0 + ((y - y0) * (t - t0)) / (time - t0),
+				];
+				for (const [start, end] of history.gapsBetween(t0, time)) {
+					const [gapStartX, gapStartY] = at(Math.max(start, t0));
+					const [gapEndX, gapEndY] = at(Math.min(end, time));
+					solid.lineTo(gapStartX, gapStartY);
+					dashed.moveTo(gapStartX, gapStartY);
+					dashed.lineTo(gapEndX, gapEndY);
+					solid.moveTo(gapEndX, gapEndY);
+				}
+				solid.lineTo(x, y);
+				previous = [time, x, y];
 			}
-			context.stroke();
+			context.stroke(solid);
+			context.setLineDash([4, 4]);
+			context.stroke(dashed);
+			context.setLineDash([]);
 		}
 		context.globalAlpha = 1;
 

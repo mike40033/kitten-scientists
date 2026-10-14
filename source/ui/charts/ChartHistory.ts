@@ -141,6 +141,12 @@ export class ChartHistory {
 	playedYears: Array<number> = [];
 	values = new Map<string, SeriesTrack>();
 	caps = new Map<string, SeriesTrack>();
+	/**
+	 * Stretches of time in which recording was paused, as `[start, end]`.
+	 */
+	gaps: Array<[number, number]> = [];
+
+	private _pausedAt: number | undefined;
 
 	get length() {
 		return this.time.length;
@@ -160,9 +166,32 @@ export class ChartHistory {
 		this.playedYears = [];
 		this.values.clear();
 		this.caps.clear();
+		this.gaps = [];
+		this._pausedAt = undefined;
+	}
+
+	/**
+	 * Remember that recording stopped, so the stretch until the next sample
+	 * can be shown as missing data.
+	 */
+	pause() {
+		if (0 < this.length) {
+			this._pausedAt = this.end;
+		}
+	}
+
+	/**
+	 * The pauses that overlap the time between `from` and `to`.
+	 */
+	gapsBetween(from: number, to: number) {
+		return this.gaps.filter(([start, end]) => start < to && from < end);
 	}
 
 	beginSample(time: number, calendarYear: number, playedYears: number) {
+		if (this._pausedAt !== undefined) {
+			this.gaps.push([this._pausedAt, time]);
+			this._pausedAt = undefined;
+		}
 		this.time.push(time);
 		this.calendarYear.push(calendarYear);
 		this.playedYears.push(playedYears);
