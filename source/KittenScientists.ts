@@ -10,7 +10,7 @@ import { cl } from "./tools/Log.js";
 import type { GamePage } from "./types/game.js";
 import type { I18nEngine, Locale } from "./types/index.js";
 import { UserScriptLoader } from "./UserScriptLoader.js";
-import { ChartsTab } from "./ui/ChartsTab.js";
+import { ChartsTab } from "./ui/charts/ChartsTab.js";
 import { UserInterface } from "./ui/UserInterface.js";
 import "iterator-helpers-polyfill";
 

@@ -1,20 +1,20 @@
-import type { KittenScientists } from "../KittenScientists.js";
-import { ucfirst } from "../tools/Format.js";
-import { cl } from "../tools/Log.js";
-import type { DesktopUI } from "../types/ui.js";
-import { UserScriptLoader } from "../UserScriptLoader.js";
+import type { KittenScientists } from "../../KittenScientists.js";
+import { cl } from "../../tools/Log.js";
+import type { DesktopUI } from "../../types/ui.js";
+import { UserScriptLoader } from "../../UserScriptLoader.js";
+import {
+	ChartCatalog,
+	type ChartGroup,
+	ChartGroups,
+	type SeriesDefinition,
+} from "./ChartCatalog.js";
+import { ChartHistory, type SeriesTrack, upperBound } from "./ChartHistory.js";
 import styles from "./ChartsTab.module.css";
 
 /**
  * How often a sample of all tracked values is taken, in milliseconds.
  */
 const SAMPLE_INTERVAL = 1000;
-
-/**
- * When the history grows beyond this many samples, the older half is thinned
- * out to half its resolution. Recent history always keeps full resolution.
- */
-const MAX_SAMPLES = 8000;
 
 /**
  * The shortest selectable time window.
@@ -56,6 +56,12 @@ const PALETTE_DARK = [
 ];
 const MAX_SERIES = PALETTE_LIGHT.length;
 
+/**
+ * Groups whose members are sorted alphabetically in the picker. All others
+ * keep the game's order.
+ */
+const SORTED_GROUPS: Array<ChartGroup> = ["resources", "production"];
+
 const SETTINGS_KEY = "ks.charts";
 
 export type ChartXAxis = "realTime" | "playedYears" | "calendarYear";
@@ -75,19 +81,10 @@ type ChartSettings = {
 	 * The visible time window in milliseconds, or `null` for everything.
 	 */
 	window: number | null;
-};
-
-type SeriesDefinition = {
-	id: string;
-	group: "stats" | "resources";
-	label: string;
-	read: () => number;
-	readCap?: () => number;
 	/**
-	 * Whether this series should be offered in the picker right now.
+	 * Picker groups that are expanded.
 	 */
-	available: () => boolean;
-	format?: (value: number) => string;
+	openGroups: Array<ChartGroup>;
 };
 
 type SeriesScale = {
@@ -97,125 +94,8 @@ type SeriesScale = {
 	fromCap: boolean;
 };
 
-/**
- * Stores the sampled history of all tracked series.
- */
-class ChartHistory {
-	time: Array<number> = [];
-	calendarYear: Array<number> = [];
-	playedYears: Array<number> = [];
-	values = new Map<string, Array<number>>();
-	caps = new Map<string, Array<number>>();
-	allTimeMax = new Map<string, number>();
-
-	get length() {
-		return this.time.length;
-	}
-
-	clear() {
-		this.time = [];
-		this.calendarYear = [];
-		this.playedYears = [];
-		this.values.clear();
-		this.caps.clear();
-		this.allTimeMax.clear();
-	}
-
-	record(
-		definitions: Iterable<SeriesDefinition>,
-		time: number,
-		calendarYear: number,
-		playedYears: number,
-	) {
-		const length = this.length;
-		for (const definition of definitions) {
-			const value = sanitize(definition.read());
-			this._push(this.values, definition.id, value, length);
-			if (definition.readCap) {
-				this._push(
-					this.caps,
-					definition.id,
-					sanitize(definition.readCap()),
-					length,
-				);
-			}
-			if (Number.isFinite(value)) {
-				const previous = this.allTimeMax.get(definition.id);
-				if (previous === undefined || previous < value) {
-					this.allTimeMax.set(definition.id, value);
-				}
-			}
-		}
-		this.time.push(time);
-		this.calendarYear.push(calendarYear);
-		this.playedYears.push(playedYears);
-
-		if (MAX_SAMPLES < this.length) {
-			this._thin();
-		}
-	}
-
-	private _push(
-		store: Map<string, Array<number>>,
-		id: string,
-		value: number,
-		length: number,
-	) {
-		let series = store.get(id);
-		if (series === undefined) {
-			// Series that appear later are padded so all arrays stay aligned.
-			series = new Array<number>(length).fill(Number.NaN);
-			store.set(id, series);
-		}
-		series.push(value);
-	}
-
-	/**
-	 * Halve the resolution of the older half of the history.
-	 */
-	private _thin() {
-		const half = Math.floor(this.length / 2);
-		const thin = (series: Array<number>) => {
-			const result: Array<number> = [];
-			for (let index = 0; index < half; index += 2) {
-				result.push(series[index]);
-			}
-			for (let index = half; index < series.length; ++index) {
-				result.push(series[index]);
-			}
-			return result;
-		};
-		this.time = thin(this.time);
-		this.calendarYear = thin(this.calendarYear);
-		this.playedYears = thin(this.playedYears);
-		for (const [id, series] of this.values) {
-			this.values.set(id, thin(series));
-		}
-		for (const [id, series] of this.caps) {
-			this.caps.set(id, thin(series));
-		}
-	}
-}
-
 const sanitize = (value: number | undefined | null) =>
 	typeof value === "number" && Number.isFinite(value) ? value : Number.NaN;
-
-/**
- * Index of the first element in the ascending `values` that is `>= target`.
- */
-const lowerBound = (values: Array<number>, target: number) => {
-	let lo = 0;
-	let hi = values.length;
-	while (lo < hi) {
-		const mid = (lo + hi) >>> 1;
-		if (values[mid] < target) {
-			lo = mid + 1;
-		} else {
-			hi = mid;
-		}
-	}
-	return lo;
-};
 
 /**
  * A "nice" step size (1, 2 or 5 times a power of ten) to split `range` into
@@ -246,29 +126,37 @@ const formatClock = (time: number, withSeconds: boolean) => {
 	return `${pad(date.getHours())}:${pad(date.getMinutes())}${withSeconds ? `:${pad(date.getSeconds())}` : ""}`;
 };
 
+const escapeHtml = (text: string) =>
+	text.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
+
 /**
  * Adds a "Charts" tab next to the game's "Log" and "Queue" tabs, which plots
  * the history of resources and other statistics since Kitten Scientists was
  * loaded (or the game was reset).
+ *
+ * Every known series is recorded all the time, so a series that gets selected
+ * later still shows its full history. Series only store the points where
+ * their value changed, so the hundreds of rarely changing ones are cheap.
  */
 export class ChartsTab {
 	private readonly _host: KittenScientists;
 	private readonly _history = new ChartHistory();
-	private readonly _definitions = new Map<string, SeriesDefinition>();
+	private readonly _catalog: ChartCatalog;
 	private _settings: ChartSettings;
 
 	private _sampleInterval: number | undefined;
 	private _visible = false;
 	private _hoverX: number | undefined;
 	private _pickerSignature = "";
+	private _pickerFilter = "";
 
 	private _link: JQuery<HTMLElement> | undefined;
 	private _tab: JQuery<HTMLElement> | undefined;
 	private _canvas: HTMLCanvasElement | undefined;
 	private _tooltip: JQuery<HTMLElement> | undefined;
 	private _legend: JQuery<HTMLElement> | undefined;
-	private _pickerOptions: JQuery<HTMLElement> | undefined;
-	private _pickerFilter = "";
+	private _pickerSelected: JQuery<HTMLElement> | undefined;
+	private _pickerGroups: JQuery<HTMLElement> | undefined;
 	private _spanLabel: JQuery<HTMLElement> | undefined;
 	private _windowSelect: JQuery<HTMLElement> | undefined;
 
@@ -278,7 +166,7 @@ export class ChartsTab {
 	constructor(host: KittenScientists) {
 		this._host = host;
 		this._settings = this._loadSettings();
-		this._defineSeries();
+		this._catalog = new ChartCatalog(host, this._history);
 		this._buildUi();
 	}
 
@@ -286,135 +174,45 @@ export class ChartsTab {
 		return this._host.engine.i18n(key);
 	}
 
-	//#region Series
-
-	private _defineSeries() {
-		const game = this._host.game;
-		const stats: Array<SeriesDefinition> = [
-			{
-				available: () => true,
-				format: (value) => value.toFixed(2),
-				group: "stats",
-				id: "stat:year",
-				label: this._t("ui.charts.series.year"),
-				read: () => this._calendarYear(),
-			},
-			{
-				available: () => true,
-				format: (value) => value.toFixed(3),
-				group: "stats",
-				id: "stat:playedYears",
-				label: this._t("ui.charts.series.playedYears"),
-				read: () => this._playedYears(),
-			},
-			{
-				available: () => 0 < (game.resPool.get("kittens")?.value ?? 0),
-				format: (value) => `${Math.round(value)}%`,
-				group: "stats",
-				id: "stat:happiness",
-				label: this._t("ui.charts.series.happiness"),
-				read: () => game.village.happiness * 100,
-			},
-			{
-				available: () => 0 < game.bld.cathPollution,
-				group: "stats",
-				id: "stat:pollution",
-				label: this._t("ui.charts.series.pollution"),
-				read: () => game.bld.cathPollution,
-			},
-			{
-				available: () => 0 < game.religion.faith,
-				group: "stats",
-				id: "stat:worship",
-				label: this._t("ui.charts.series.worship"),
-				read: () => game.religion.faith,
-			},
-			{
-				available: () => 0 < game.religion.faithRatio,
-				group: "stats",
-				id: "stat:epiphany",
-				label: this._t("ui.charts.series.epiphany"),
-				read: () => game.religion.faithRatio,
-			},
-			{
-				available: () =>
-					0 < game.resPool.energyProd || 0 < game.resPool.energyCons,
-				group: "stats",
-				id: "stat:energy",
-				label: this._t("ui.charts.series.energy"),
-				read: () => game.resPool.energyProd - game.resPool.energyCons,
-			},
-		];
-		for (const definition of stats) {
-			this._definitions.set(definition.id, definition);
-		}
-		this._refreshResourceDefinitions();
+	private get _definitions() {
+		return this._catalog.definitions;
 	}
 
-	/**
-	 * Resources can be added by the game at runtime, so this is re-run on
-	 * every sample.
-	 */
-	private _refreshResourceDefinitions() {
-		for (const resource of this._host.game.resPool.resources) {
-			const id = `res:${resource.name}`;
-			if (this._definitions.has(id)) {
-				continue;
-			}
-			this._definitions.set(id, {
-				available: () =>
-					resource.unlocked === true || 0 < (resource.value ?? 0),
-				group: "resources",
-				id,
-				label: ucfirst(resource.title || resource.name),
-				read: () => resource.value ?? Number.NaN,
-				readCap: () => resource.maxValue ?? Number.NaN,
-			});
-		}
-	}
-
-	private _calendarYear() {
-		const calendar = this._host.game.calendar;
-		const daysPerYear = calendar.daysPerSeason * calendar.seasonsPerYear;
-		return (
-			calendar.year +
-			(calendar.season * calendar.daysPerSeason + calendar.day) / daysPerYear
-		);
-	}
-
-	/**
-	 * Game time that was actually simulated (excluding time skips), in years.
-	 */
-	private _playedYears() {
-		const calendar = this._host.game.calendar;
-		const ticksPerYear =
-			calendar.ticksPerDay * calendar.daysPerSeason * calendar.seasonsPerYear;
-		return this._host.game.ticks / ticksPerYear;
-	}
+	//#region Sampling
 
 	private _sample() {
 		try {
-			this._refreshResourceDefinitions();
-			const calendarYear = this._calendarYear();
-			const playedYears = this._playedYears();
-			const length = this._history.length;
+			this._catalog.refresh();
+			const calendarYear = this._catalog.calendarYear();
+			const playedYears = this._catalog.playedYears();
+			const history = this._history;
+			const length = history.length;
 			if (
 				0 < length &&
-				(calendarYear < this._history.calendarYear[length - 1] - 0.01 ||
-					playedYears < this._history.playedYears[length - 1] - 0.01)
+				(calendarYear < history.calendarYear[length - 1] - 0.01 ||
+					playedYears < history.playedYears[length - 1] - 0.01)
 			) {
 				// The game was reset, or an older save was loaded.
 				console.info(
 					...cl("Charts: game time went backwards. Clearing history."),
 				);
-				this._history.clear();
+				history.clear();
 			}
-			this._history.record(
-				this._definitions.values(),
-				Date.now(),
-				calendarYear,
-				playedYears,
-			);
+
+			const now = Date.now();
+			history.beginSample(now, calendarYear, playedYears);
+			for (const definition of this._definitions.values()) {
+				let value = Number.NaN;
+				let cap: number | undefined;
+				try {
+					value = sanitize(definition.read());
+					cap = definition.readCap ? sanitize(definition.readCap()) : undefined;
+				} catch (_error: unknown) {
+					// Some game values can't be computed in every game state.
+				}
+				history.record(definition.id, now, value, cap);
+			}
+
 			if (this._visible) {
 				this._refreshPicker();
 				this.render();
@@ -466,6 +264,7 @@ export class ChartsTab {
 	private _loadSettings(): ChartSettings {
 		const defaults: ChartSettings = {
 			focused: "res:catnip",
+			openGroups: ["overview"],
 			series: { "res:catnip": 0, "res:kittens": 1 },
 			window: null,
 			xAxis: "realTime",
@@ -597,7 +396,9 @@ export class ChartsTab {
 				]),
 				["custom", this._t("ui.charts.window.custom")],
 			],
-			String(this._settings.window),
+			WINDOW_PRESETS.some(([, value]) => value === this._settings.window)
+				? String(this._settings.window)
+				: "custom",
 			(value) => {
 				if (value === "custom") return;
 				this._settings.window = value === "null" ? null : Number(value);
@@ -679,24 +480,24 @@ export class ChartsTab {
 			.text(this._t("ui.charts.hint"));
 
 		// Series picker
-		this._pickerOptions = $("<div/>");
 		const filter = $("<input/>", {
 			placeholder: this._t("ui.charts.filter"),
 			type: "search",
 		}).on("input", () => {
-			this._pickerFilter = String(filter.val()).toLowerCase();
-			this._pickerSignature = "";
-			this._refreshPicker();
+			this._pickerFilter = String(filter.val()).trim().toLowerCase();
+			this._refreshPicker(true);
 		});
-		const picker = $("<details/>")
+		this._pickerSelected = $("<div/>").addClass(styles.selected);
+		this._pickerGroups = $("<div/>");
+		const picker = $("<div/>")
 			.addClass(styles.picker)
-			.attr("open", "")
 			.append(
-				$("<summary/>").text(
-					this._t("ui.charts.series").replace("{0}", String(MAX_SERIES)),
-				),
+				$("<div/>")
+					.addClass(styles.pickerHeading)
+					.text(this._t("ui.charts.series").replace("{0}", String(MAX_SERIES))),
+				this._pickerSelected,
 				filter,
-				this._pickerOptions,
+				this._pickerGroups,
 			);
 
 		this._tab.append(controls, plot, this._legend, hint, picker);
@@ -712,8 +513,7 @@ export class ChartsTab {
 		this._link?.toggleClass("active", true);
 		this._tab.show();
 		this._visible = true;
-		this._pickerSignature = "";
-		this._refreshPicker();
+		this._refreshPicker(true);
 		this.render();
 	}
 
@@ -725,10 +525,7 @@ export class ChartsTab {
 
 	private _zoom(factor: number) {
 		const history = this._history;
-		const fullSpan =
-			1 < history.length
-				? history.time[history.length - 1] - history.time[0]
-				: 0;
+		const fullSpan = 1 < history.length ? history.end - history.start : 0;
 		const current = this._settings.window ?? Math.max(fullSpan, MIN_WINDOW);
 		const next = Math.max(MIN_WINDOW, current * factor);
 		this._settings.window = fullSpan <= next && 1 < factor ? null : next;
@@ -740,54 +537,132 @@ export class ChartsTab {
 		this.render();
 	}
 
-	private _refreshPicker() {
-		if (!this._pickerOptions) return;
-		const available = [...this._definitions.values()].filter(
-			(definition) =>
-				(definition.available() || definition.id in this._settings.series) &&
-				definition.label.toLowerCase().includes(this._pickerFilter),
+	private _onToggle(id: string, checked: boolean) {
+		if (!this._toggleSeries(id, checked)) {
+			this._host.engine.imessage("ui.charts.tooMany", [String(MAX_SERIES)]);
+		}
+		this._refreshPicker(true);
+		this.render();
+	}
+
+	private _checkbox(definition: SeriesDefinition, label = definition.label) {
+		const checkbox = $("<input/>", { type: "checkbox" }).prop(
+			"checked",
+			definition.id in this._settings.series,
 		);
-		// Only rebuild when the set of offered series changes.
-		const signature = available.map((definition) => definition.id).join(",");
-		if (signature === this._pickerSignature) return;
+		checkbox.on("change", () =>
+			this._onToggle(definition.id, checkbox.prop("checked") as boolean),
+		);
+		return $("<label/>", { title: definition.longLabel }).append(
+			checkbox,
+			` ${label}`,
+		);
+	}
+
+	/**
+	 * Rebuilds the series picker, if anything in it changed.
+	 */
+	private _refreshPicker(force = false) {
+		if (!this._pickerGroups || !this._pickerSelected) return;
+
+		const filter = this._pickerFilter;
+		const matches = (definition: SeriesDefinition) =>
+			filter === "" ||
+			definition.longLabel.toLowerCase().includes(filter) ||
+			(definition.subgroup ?? "").toLowerCase().includes(filter);
+		const offered = (definition: SeriesDefinition) =>
+			(definition.available() || definition.id in this._settings.series) &&
+			matches(definition);
+
+		const groups = ChartGroups.map(
+			(group) =>
+				[group, this._catalog.membersOf(group).filter(offered)] as const,
+		).filter(([, members]) => 0 < members.length);
+
+		const signature = JSON.stringify([
+			filter,
+			this._settings.series,
+			groups.map(([group, members]) => [
+				group,
+				members.map((member) => member.id),
+			]),
+		]);
+		if (!force && signature === this._pickerSignature) return;
 		this._pickerSignature = signature;
 
-		this._pickerOptions.empty();
-		for (const group of ["stats", "resources"] as const) {
-			const members = available
-				.filter((definition) => definition.group === group)
-				.sort((a, b) =>
-					group === "resources" ? a.label.localeCompare(b.label) : 0,
-				);
-			if (members.length === 0) continue;
-			const options = $("<div/>").addClass(styles.options);
-			for (const definition of members) {
-				const checkbox = $("<input/>", { type: "checkbox" }).prop(
-					"checked",
-					definition.id in this._settings.series,
-				);
-				checkbox.on("change", () => {
-					const checked = checkbox.prop("checked") as boolean;
-					if (!this._toggleSeries(definition.id, checked)) {
-						checkbox.prop("checked", false);
-						this._host.engine.imessage("ui.charts.tooMany", [
-							String(MAX_SERIES),
-						]);
-					}
-					this.render();
+		// The currently selected series, for quick removal.
+		this._pickerSelected.empty();
+		for (const [id, slot] of Object.entries(this._settings.series)) {
+			const definition = this._definitions.get(id);
+			const chip = $("<a/>", { href: "#", title: this._t("ui.charts.remove") })
+				.addClass(styles.chip)
+				.append(
+					$("<span/>")
+						.addClass(styles.swatch)
+						.css("background", this._palette()[slot % MAX_SERIES]),
+					` ${definition?.longLabel ?? id} ✕`,
+				)
+				.on("click", (event) => {
+					event.preventDefault();
+					this._onToggle(id, false);
 				});
-				options.append(
-					$("<label/>", { title: definition.label }).append(
-						checkbox,
-						` ${definition.label}`,
+			this._pickerSelected.append(chip);
+		}
+
+		this._pickerGroups.empty();
+		for (const [group, members] of groups) {
+			const selectedCount = members.filter(
+				(member) => member.id in this._settings.series,
+			).length;
+			const open = filter !== "" || this._settings.openGroups.includes(group);
+			const details = $("<details/>")
+				.addClass(styles.group)
+				.prop("open", open)
+				.append(
+					$("<summary/>").text(
+						`${this._t(`ui.charts.group.${group}`)} (${selectedCount ? `${selectedCount}/` : ""}${members.length})`,
 					),
 				);
+			details.on("toggle", () => {
+				if (filter !== "") return;
+				const isOpen = details.prop("open") as boolean;
+				const openGroups = new Set(this._settings.openGroups);
+				if (isOpen) openGroups.add(group);
+				else openGroups.delete(group);
+				this._settings.openGroups = [...openGroups];
+				this._storeSettings();
+			});
+
+			// Bucket members by subgroup, keeping the order of first appearance.
+			const subgroups = new Map<string, Array<SeriesDefinition>>();
+			for (const member of members) {
+				// The overview mixes groups, so its members show their long label.
+				const key = group === "overview" ? "" : (member.subgroup ?? "");
+				subgroups.set(key, [...(subgroups.get(key) ?? []), member]);
 			}
-			this._pickerOptions.append(
-				$("<div/>")
-					.addClass(styles.group)
-					.text(this._t(`ui.charts.group.${group}`)),
-				options,
+			for (const [subgroup, subMembers] of subgroups) {
+				if (SORTED_GROUPS.includes(group)) {
+					subMembers.sort((a, b) => a.label.localeCompare(b.label));
+				}
+				if (subgroup !== "") {
+					details.append($("<div/>").addClass(styles.subgroup).text(subgroup));
+				}
+				const options = $("<div/>").addClass(styles.options);
+				for (const member of subMembers) {
+					options.append(
+						this._checkbox(
+							member,
+							group === "overview" ? member.longLabel : member.label,
+						),
+					);
+				}
+				details.append(options);
+			}
+			this._pickerGroups.append(details);
+		}
+		if (groups.length === 0) {
+			this._pickerGroups.append(
+				$("<div/>").addClass(styles.hint).text(this._t("ui.charts.noMatch")),
 			);
 		}
 	}
@@ -795,6 +670,10 @@ export class ChartsTab {
 	//#endregion
 
 	//#region Rendering
+
+	private _palette() {
+		return this._isDark(this._surfaceColor()) ? PALETTE_DARK : PALETTE_LIGHT;
+	}
 
 	private _format(id: string, value: number) {
 		if (!Number.isFinite(value)) return "–";
@@ -806,17 +685,14 @@ export class ChartsTab {
 
 	private _scaleFor(
 		id: string,
+		values: Array<number>,
 		from: number,
 		to: number,
 	): SeriesScale | undefined {
-		const values = this._history.values.get(id);
-		if (values === undefined) return undefined;
-
 		let min = Number.POSITIVE_INFINITY;
 		let max = Number.NEGATIVE_INFINITY;
 		let minPositive = Number.POSITIVE_INFINITY;
-		for (let index = from; index < to; ++index) {
-			const value = values[index];
+		for (const value of values) {
 			if (!Number.isFinite(value)) continue;
 			min = Math.min(min, value);
 			max = Math.max(max, value);
@@ -824,24 +700,23 @@ export class ChartsTab {
 		}
 		if (!Number.isFinite(max)) return undefined;
 
+		const allTimeMax = this._history.values.get(id)?.max ?? max;
 		let hi = max;
 		let fromCap = false;
 		if (this._settings.yMax === "cap") {
-			const caps = this._history.caps.get(id);
+			const [, caps] = this._history.caps.get(id)?.slice(from, to) ?? [[], []];
 			let cap = Number.NEGATIVE_INFINITY;
-			if (caps) {
-				for (let index = from; index < to; ++index) {
-					if (Number.isFinite(caps[index])) cap = Math.max(cap, caps[index]);
-				}
+			for (const value of caps) {
+				if (Number.isFinite(value)) cap = Math.max(cap, value);
 			}
 			if (0 < cap) {
 				hi = Math.max(cap, max);
 				fromCap = true;
 			} else {
-				hi = this._history.allTimeMax.get(id) ?? max;
+				hi = Math.max(max, allTimeMax);
 			}
 		} else if (this._settings.yMax === "allTime") {
-			hi = Math.max(max, this._history.allTimeMax.get(id) ?? max);
+			hi = Math.max(max, allTimeMax);
 		}
 
 		if (this._settings.yScale === "log") {
@@ -870,14 +745,17 @@ export class ChartsTab {
 		};
 	}
 
-	private _xValues(): Array<number> {
+	/**
+	 * The year clock for the current x axis, or `undefined` for real time.
+	 */
+	private _clock(): Array<number> | undefined {
 		switch (this._settings.xAxis) {
 			case "calendarYear":
 				return this._history.calendarYear;
 			case "playedYears":
 				return this._history.playedYears;
 			default:
-				return this._history.time;
+				return undefined;
 		}
 	}
 
@@ -913,8 +791,7 @@ export class ChartsTab {
 		);
 		const textColor = columnStyle.color || "#000";
 		const surface = this._surfaceColor();
-		const dark = this._isDark(surface);
-		const palette = dark ? PALETTE_DARK : PALETTE_LIGHT;
+		const palette = this._isDark(surface) ? PALETTE_DARK : PALETTE_LIGHT;
 		this._tooltip?.css({
 			"--ks-charts-surface": surface,
 			"--ks-charts-text": textColor,
@@ -922,16 +799,19 @@ export class ChartsTab {
 		context.font = "10px sans-serif";
 
 		const history = this._history;
-		const length = history.length;
-		const selected = Object.entries(this._settings.series).filter(([id]) =>
-			history.values.has(id),
-		);
+		const selected: Array<[string, number, SeriesTrack]> = [];
+		for (const [id, slot] of Object.entries(this._settings.series)) {
+			const track = history.values.get(id);
+			if (track) selected.push([id, slot, track]);
+		}
 
-		if (length < 2 || selected.length === 0) {
+		if (history.length < 2 || selected.length === 0) {
 			context.fillStyle = textColor;
 			context.textAlign = "center";
 			context.fillText(
-				this._t(length < 2 ? "ui.charts.collecting" : "ui.charts.empty"),
+				this._t(
+					history.length < 2 ? "ui.charts.collecting" : "ui.charts.empty",
+				),
 				width / 2,
 				height / 2,
 			);
@@ -941,27 +821,25 @@ export class ChartsTab {
 			return;
 		}
 
-		// Determine the visible sample range.
-		const now = history.time[length - 1];
+		// Determine the visible time range.
+		const now = history.end;
 		const windowStart =
 			this._settings.window === null
-				? history.time[0]
-				: now - this._settings.window;
-		let from = lowerBound(history.time, windowStart);
-		if (length - from < 2) from = length - 2;
-		const to = length;
+				? history.start
+				: Math.max(history.start, now - this._settings.window);
 		this._spanLabel?.text(
 			this._t("ui.charts.showing").replace(
 				"{0}",
-				formatDuration(now - history.time[from]),
+				formatDuration(now - windowStart),
 			),
 		);
 
-		const xs = this._xValues();
-		const xMin = xs[from];
-		let xMax = xs[to - 1];
-		if (xMax <= xMin)
-			xMax = xMin + (this._settings.xAxis === "realTime" ? 1000 : 0.001);
+		const clock = this._clock();
+		const xOf = (time: number) =>
+			clock === undefined ? time : history.yearAt(clock, time);
+		const xMin = xOf(windowStart);
+		let xMax = xOf(now);
+		if (xMax <= xMin) xMax = xMin + (clock === undefined ? 1000 : 0.001);
 
 		const area = { bottom: height - 18, left: 46, right: width - 6, top: 6 };
 		const toX = (value: number) =>
@@ -975,9 +853,12 @@ export class ChartsTab {
 				? this._settings.focused
 				: selected[0][0];
 
+		const slices = new Map<string, [Array<number>, Array<number>]>();
 		const scales = new Map<string, SeriesScale>();
-		for (const [id] of selected) {
-			const scale = this._scaleFor(id, from, to);
+		for (const [id, , track] of selected) {
+			const slice = track.slice(windowStart, now);
+			slices.set(id, slice);
+			const scale = this._scaleFor(id, slice[1], windowStart, now);
 			if (scale) scales.set(id, scale);
 		}
 
@@ -1029,12 +910,12 @@ export class ChartsTab {
 		context.textBaseline = "top";
 		const xSpan = xMax - xMin;
 		const xStep =
-			this._settings.xAxis === "realTime"
+			clock === undefined
 				? ([1 / 6, 1 / 2, 1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440]
 						.map((minutes) => minutes * 60000)
 						.find((step) => xSpan / step <= 5) ?? xSpan)
 				: niceStep(xSpan, 4);
-		const labelSpan = this._settings.xAxis === "realTime" ? xSpan : xStep * 4;
+		const labelSpan = clock === undefined ? xSpan : xStep * 4;
 		for (
 			let value = Math.ceil(xMin / xStep) * xStep;
 			value <= xMax;
@@ -1053,20 +934,21 @@ export class ChartsTab {
 		);
 		for (const [id, slot] of ordered) {
 			const scale = scales.get(id);
-			const values = history.values.get(id);
-			if (!scale || !values) continue;
+			const slice = slices.get(id);
+			if (!scale || !slice) continue;
+			const [times, values] = slice;
 			context.strokeStyle = palette[slot % palette.length];
 			context.lineWidth = id === focusedId ? 2 : 1.5;
 			context.lineJoin = "round";
 			context.beginPath();
 			let penDown = false;
-			for (let index = from; index < to; ++index) {
+			for (let index = 0; index < times.length; ++index) {
 				const fraction = scale.project(values[index]);
 				if (!Number.isFinite(fraction)) {
 					penDown = false;
 					continue;
 				}
-				const x = toX(xs[index]);
+				const x = toX(xOf(times[index]));
 				const y = toY(fraction);
 				if (penDown) {
 					context.lineTo(x, y);
@@ -1079,16 +961,24 @@ export class ChartsTab {
 		}
 
 		// Hover crosshair and tooltip.
-		let hoverIndex: number | undefined;
+		let hoverTime: number | undefined;
 		if (this._hoverX !== undefined && area.left <= this._hoverX) {
 			const target =
 				xMin +
 				((this._hoverX - area.left) / (area.right - area.left)) * (xMax - xMin);
-			let index = Math.min(to - 1, Math.max(from, lowerBound(xs, target)));
-			if (from < index && target - xs[index - 1] < xs[index] - target)
+			// Snap to the nearest sample.
+			const axis = clock ?? history.time;
+			const first = upperBound(history.time, windowStart - 1);
+			let index = Math.min(
+				history.length - 1,
+				Math.max(first, upperBound(axis, target)),
+			);
+			if (first < index && target - axis[index - 1] < axis[index] - target) {
 				index -= 1;
-			hoverIndex = index;
-			const x = toX(xs[index]);
+			}
+			const time = history.time[index];
+			hoverTime = time;
+			const x = toX(axis[index]);
 			context.strokeStyle = textColor;
 			context.globalAlpha = 0.4;
 			context.lineWidth = 1;
@@ -1097,11 +987,10 @@ export class ChartsTab {
 			context.lineTo(Math.round(x) + 0.5, area.bottom);
 			context.stroke();
 			context.globalAlpha = 1;
-			for (const [id, slot] of selected) {
+			for (const [id, slot, track] of selected) {
 				const scale = scales.get(id);
-				const value = history.values.get(id)?.[index];
-				if (!scale || value === undefined) continue;
-				const fraction = scale.project(value);
+				if (!scale) continue;
+				const fraction = scale.project(track.valueAt(time));
 				if (!Number.isFinite(fraction)) continue;
 				context.fillStyle = palette[slot % palette.length];
 				context.strokeStyle = surface;
@@ -1114,10 +1003,10 @@ export class ChartsTab {
 
 			if (this._tooltip) {
 				const lines = [
-					`<div>${formatClock(history.time[index], true)} · ${this._t("ui.charts.yearShort")} ${history.calendarYear[index].toFixed(2)}</div>`,
+					`<div>${formatClock(time, true)} · ${this._t("ui.charts.yearShort")} ${history.calendarYear[index].toFixed(2)}</div>`,
 					...selected.map(
-						([id, slot]) =>
-							`<div><span class="${styles.swatch}" style="background:${palette[slot % palette.length]}"></span> ${escapeHtml(this._definitions.get(id)?.label ?? id)}: ${this._format(id, history.values.get(id)?.[index] ?? Number.NaN)}</div>`,
+						([id, slot, track]) =>
+							`<div><span class="${styles.swatch}" style="background:${palette[slot % palette.length]}"></span> ${escapeHtml(this._definitions.get(id)?.longLabel ?? id)}: ${escapeHtml(this._format(id, track.valueAt(time)))}</div>`,
 					),
 				];
 				this._tooltip.html(lines.join("")).show();
@@ -1133,9 +1022,9 @@ export class ChartsTab {
 		}
 
 		// Legend.
-		const legendIndex = hoverIndex ?? to - 1;
+		const legendTime = hoverTime ?? now;
 		this._legend.empty();
-		for (const [id, slot] of selected) {
+		for (const [id, slot, track] of selected) {
 			const scale = scales.get(id);
 			const range = scale
 				? `[${this._format(id, scale.lo)} – ${this._format(id, scale.hi)}${scale.fromCap ? ` ${this._t("ui.charts.capShort")}` : ""}]`
@@ -1147,15 +1036,10 @@ export class ChartsTab {
 					$("<span/>")
 						.addClass(styles.swatch)
 						.css("background", palette[slot % palette.length]),
-					$("<span/>").text(this._definitions.get(id)?.label ?? id),
+					$("<span/>").text(this._definitions.get(id)?.longLabel ?? id),
 					$("<span/>")
 						.addClass(styles.legendValue)
-						.text(
-							this._format(
-								id,
-								history.values.get(id)?.[legendIndex] ?? Number.NaN,
-							),
-						),
+						.text(this._format(id, track.valueAt(legendTime))),
 					$("<span/>").addClass(styles.legendRange).text(range),
 				)
 				.on("click", () => {
@@ -1193,6 +1077,3 @@ export class ChartsTab {
 
 	//#endregion
 }
-
-const escapeHtml = (text: string) =>
-	text.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
