@@ -22,6 +22,10 @@
 	}
 }
 
+.record {
+	font-weight: bold;
+}
+
 .span {
 	opacity: 0.75;
 }

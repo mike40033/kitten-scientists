@@ -73,6 +73,14 @@ type ChartSettings = {
 	 * Selected series IDs, mapped to the palette slot they were assigned.
 	 */
 	series: Record<string, number>;
+	/**
+	 * Whether values are being recorded. Off by default, so nothing is
+	 * collected in the background for players who don't use charts.
+	 */
+	recording: boolean;
+	/**
+	 * The series whose scale is shown on the vertical axis, if any.
+	 */
 	focused: string | undefined;
 	xAxis: ChartXAxis;
 	yScale: ChartYScale;
@@ -147,6 +155,21 @@ export class ChartsTab {
 	private _sampleInterval: number | undefined;
 	private _visible = false;
 	private _hoverX: number | undefined;
+	/**
+	 * A series whose scale is previewed on the axis while hovering its legend
+	 * entry.
+	 */
+	private _previewId: string | undefined;
+	private _legendSignature = "";
+	private _legendItems = new Map<
+		string,
+		{
+			item: JQuery<HTMLElement>;
+			value: JQuery<HTMLElement>;
+			range: JQuery<HTMLElement>;
+		}
+	>();
+	private _recordToggle: JQuery<HTMLElement> | undefined;
 	private _pickerSignature = "";
 	private _pickerFilter = "";
 
@@ -226,7 +249,16 @@ export class ChartsTab {
 
 	//#region Lifecycle
 
+	/**
+	 * Starts recording, if the user enabled it.
+	 */
 	start() {
+		if (this._settings.recording) {
+			this._startSampling();
+		}
+	}
+
+	private _startSampling() {
 		if (this._sampleInterval !== undefined) {
 			return;
 		}
@@ -237,11 +269,29 @@ export class ChartsTab {
 		);
 	}
 
-	destroy() {
+	private _stopSampling() {
 		if (this._sampleInterval !== undefined) {
 			UserScriptLoader.window.clearInterval(this._sampleInterval);
 			this._sampleInterval = undefined;
 		}
+	}
+
+	private _setRecording(recording: boolean) {
+		this._settings.recording = recording;
+		this._storeSettings();
+		if (recording) {
+			this._startSampling();
+		} else {
+			// Free the memory. Nobody is going to look at stale history.
+			this._stopSampling();
+			this._history.clear();
+		}
+		this._refreshPicker(true);
+		this.render();
+	}
+
+	destroy() {
+		this._stopSampling();
 		const ui = this._host.game.ui;
 		if (this._originalLoadLog !== undefined) {
 			ui.loadLog = this._originalLoadLog;
@@ -263,8 +313,9 @@ export class ChartsTab {
 
 	private _loadSettings(): ChartSettings {
 		const defaults: ChartSettings = {
-			focused: "res:catnip",
+			focused: undefined,
 			openGroups: ["overview"],
+			recording: false,
 			series: { "res:catnip": 0, "res:kittens": 1 },
 			window: null,
 			xAxis: "realTime",
@@ -305,11 +356,10 @@ export class ChartsTab {
 				return false;
 			}
 			series[id] = slot;
-			this._settings.focused = this._settings.focused ?? id;
 		} else {
 			delete series[id];
 			if (this._settings.focused === id) {
-				this._settings.focused = Object.keys(series)[0];
+				this._settings.focused = undefined;
 			}
 		}
 		this._storeSettings();
@@ -437,12 +487,21 @@ export class ChartsTab {
 			.on("click", (event) => {
 				event.preventDefault();
 				this._history.clear();
-				this._sample();
+				if (this._settings.recording) this._sample();
+				this.render();
 			});
+		this._recordToggle = $("<input/>", { type: "checkbox" })
+			.prop("checked", this._settings.recording)
+			.on("change", () =>
+				this._setRecording(this._recordToggle?.prop("checked") as boolean),
+			);
 
 		const controls = $("<div/>")
 			.addClass(styles.controls)
 			.append(
+				$("<label/>", { title: this._t("ui.charts.recordHint") })
+					.addClass(styles.record)
+					.append(this._recordToggle, ` ${this._t("ui.charts.record")}`),
 				labeled(this._t("ui.charts.xAxis"), xAxisSelect),
 				labeled(this._t("ui.charts.window"), this._windowSelect),
 				labeled(this._t("ui.charts.yScale"), yScaleSelect),
@@ -810,12 +869,18 @@ export class ChartsTab {
 			context.textAlign = "center";
 			context.fillText(
 				this._t(
-					history.length < 2 ? "ui.charts.collecting" : "ui.charts.empty",
+					!this._settings.recording
+						? "ui.charts.notRecording"
+						: history.length < 2
+							? "ui.charts.collecting"
+							: "ui.charts.empty",
 				),
 				width / 2,
 				height / 2,
 			);
 			this._legend.empty();
+			this._legendSignature = "";
+			this._legendItems.clear();
 			this._tooltip?.hide();
 			this._spanLabel?.text("");
 			return;
@@ -841,17 +906,24 @@ export class ChartsTab {
 		let xMax = xOf(now);
 		if (xMax <= xMin) xMax = xMin + (clock === undefined ? 1000 : 0.001);
 
-		const area = { bottom: height - 18, left: 46, right: width - 6, top: 6 };
+		// With several series there is no single meaningful scale, so numbers are
+		// only shown for one the user picked (or hovers in the legend).
+		const axisId =
+			this._previewId !== undefined && this._previewId in this._settings.series
+				? this._previewId
+				: this._settings.focused !== undefined &&
+						this._settings.focused in this._settings.series
+					? this._settings.focused
+					: selected.length === 1
+						? selected[0][0]
+						: undefined;
+
+		const area = { bottom: height - 18, left: 46, right: width - 6, top: 18 };
 		const toX = (value: number) =>
 			area.left + ((value - xMin) / (xMax - xMin)) * (area.right - area.left);
 		const toY = (fraction: number) =>
 			area.bottom -
 			Math.min(1, Math.max(0, fraction)) * (area.bottom - area.top);
-
-		const focusedId =
-			this._settings.focused && this._settings.focused in this._settings.series
-				? this._settings.focused
-				: selected[0][0];
 
 		const slices = new Map<string, [Array<number>, Array<number>]>();
 		const scales = new Map<string, SeriesScale>();
@@ -862,14 +934,28 @@ export class ChartsTab {
 			if (scale) scales.set(id, scale);
 		}
 
-		// Grid and y labels of the focused series.
+		// Grid, and the y labels of the axis series.
 		context.strokeStyle = textColor;
 		context.fillStyle = textColor;
 		context.lineWidth = 1;
-		const focusedScale = scales.get(focusedId);
+		const axisScale = axisId !== undefined ? scales.get(axisId) : undefined;
 		context.textAlign = "right";
 		context.textBaseline = "middle";
-		if (focusedScale) {
+		if (axisId === undefined || axisScale === undefined) {
+			for (const fraction of [0, 0.25, 0.5, 0.75, 1]) {
+				const y = Math.round(toY(fraction)) + 0.5;
+				context.globalAlpha = 0.15;
+				context.beginPath();
+				context.moveTo(area.left, y);
+				context.lineTo(area.right, y);
+				context.stroke();
+			}
+			context.globalAlpha = 0.6;
+			context.textAlign = "left";
+			context.fillText(this._t("ui.charts.axisNone"), area.left, 8);
+		} else {
+			const focusedScale = axisScale;
+			const focusedId = axisId;
 			const ticks: Array<number> = [];
 			if (this._settings.yScale === "log") {
 				const first = Math.ceil(Math.log10(focusedScale.lo));
@@ -898,6 +984,18 @@ export class ChartsTab {
 				context.globalAlpha = 0.8;
 				context.fillText(this._format(focusedId, tick), area.left - 4, y);
 			}
+			// Name the series the numbers belong to.
+			const slot = this._settings.series[focusedId] ?? 0;
+			context.globalAlpha = 1;
+			context.fillStyle = palette[slot % palette.length];
+			context.fillRect(area.left, 7, 14, 3);
+			context.fillStyle = textColor;
+			context.textAlign = "left";
+			context.fillText(
+				this._definitions.get(focusedId)?.longLabel ?? focusedId,
+				area.left + 18,
+				8,
+			);
 		}
 
 		// X axis.
@@ -928,9 +1026,10 @@ export class ChartsTab {
 		}
 		context.globalAlpha = 1;
 
-		// Series lines. The focused series is drawn last, so it is on top.
+		// Series lines. The axis series is drawn last, so it is on top, and
+		// the others step back a little.
 		const ordered = [...selected].sort(([a], [b]) =>
-			a === focusedId ? 1 : b === focusedId ? -1 : 0,
+			a === axisId ? 1 : b === axisId ? -1 : 0,
 		);
 		for (const [id, slot] of ordered) {
 			const scale = scales.get(id);
@@ -938,7 +1037,11 @@ export class ChartsTab {
 			if (!scale || !slice) continue;
 			const [times, values] = slice;
 			context.strokeStyle = palette[slot % palette.length];
-			context.lineWidth = id === focusedId ? 2 : 1.5;
+			context.lineWidth = id === axisId ? 2.5 : 1.5;
+			context.globalAlpha =
+				axisId === undefined || id === axisId || selected.length === 1
+					? 1
+					: 0.55;
 			context.lineJoin = "round";
 			context.beginPath();
 			let penDown = false;
@@ -959,6 +1062,7 @@ export class ChartsTab {
 			}
 			context.stroke();
 		}
+		context.globalAlpha = 1;
 
 		// Hover crosshair and tooltip.
 		let hoverTime: number | undefined;
@@ -1021,33 +1125,60 @@ export class ChartsTab {
 			this._tooltip?.hide();
 		}
 
-		// Legend.
+		// Legend. Only rebuilt when the selection changes, so hovering an entry
+		// isn't interrupted by every refresh.
 		const legendTime = hoverTime ?? now;
-		this._legend.empty();
-		for (const [id, slot, track] of selected) {
+		const legendSignature = selected
+			.map(([id, slot]) => `${id}=${slot}`)
+			.join();
+		if (legendSignature !== this._legendSignature) {
+			this._legendSignature = legendSignature;
+			this._legend.empty();
+			this._legendItems.clear();
+			for (const [id, slot] of selected) {
+				const value = $("<span/>").addClass(styles.legendValue);
+				const range = $("<span/>").addClass(styles.legendRange);
+				const item = $("<li/>")
+					.attr("title", this._t("ui.charts.focusHint"))
+					.append(
+						$("<span/>")
+							.addClass(styles.swatch)
+							.css("background", palette[slot % palette.length]),
+						$("<span/>").text(this._definitions.get(id)?.longLabel ?? id),
+						value,
+						range,
+					)
+					.on("click", () => {
+						// Clicking the axis series again takes its numbers off the axis.
+						this._settings.focused =
+							this._settings.focused === id ? undefined : id;
+						this._previewId = undefined;
+						this._storeSettings();
+						this.render();
+					})
+					.on("mouseenter", () => {
+						this._previewId = id;
+						this.render();
+					})
+					.on("mouseleave", () => {
+						this._previewId = undefined;
+						this.render();
+					});
+				this._legendItems.set(id, { item, range, value });
+				this._legend.append(item);
+			}
+		}
+		for (const [id, , track] of selected) {
+			const entry = this._legendItems.get(id);
+			if (!entry) continue;
 			const scale = scales.get(id);
-			const range = scale
-				? `[${this._format(id, scale.lo)} – ${this._format(id, scale.hi)}${scale.fromCap ? ` ${this._t("ui.charts.capShort")}` : ""}]`
-				: "";
-			const item = $("<li/>")
-				.toggleClass(styles.focused, id === focusedId)
-				.attr("title", this._t("ui.charts.focusHint"))
-				.append(
-					$("<span/>")
-						.addClass(styles.swatch)
-						.css("background", palette[slot % palette.length]),
-					$("<span/>").text(this._definitions.get(id)?.longLabel ?? id),
-					$("<span/>")
-						.addClass(styles.legendValue)
-						.text(this._format(id, track.valueAt(legendTime))),
-					$("<span/>").addClass(styles.legendRange).text(range),
-				)
-				.on("click", () => {
-					this._settings.focused = id;
-					this._storeSettings();
-					this.render();
-				});
-			this._legend.append(item);
+			entry.item.toggleClass(styles.focused, id === axisId);
+			entry.value.text(this._format(id, track.valueAt(legendTime)));
+			entry.range.text(
+				scale
+					? `[${this._format(id, scale.lo)} – ${this._format(id, scale.hi)}${scale.fromCap ? ` ${this._t("ui.charts.capShort")}` : ""}]`
+					: "",
+			);
 		}
 	}
 
