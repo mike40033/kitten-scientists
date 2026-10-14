@@ -177,6 +177,7 @@ export class ChartsTab {
 	>();
 	private _recordToggle: JQuery<HTMLElement> | undefined;
 	private _notice: JQuery<HTMLElement> | undefined;
+	private _saveLoadedHandle: ["server/load", number] | undefined;
 	private _pickerSignature = "";
 	private _pickerFilter = "";
 
@@ -199,6 +200,27 @@ export class ChartsTab {
 		this._catalog = new ChartCatalog(host, this._history);
 		this._buildUi();
 		this._explainLostHistory();
+
+		// Resets reload the page, which discards the history anyway. The only
+		// way the game state changes underneath us is loading a save (import or
+		// cloud save), and the game announces that.
+		this._saveLoadedHandle = UserScriptLoader.window.dojo.subscribe(
+			"server/load",
+			() => this._onSaveLoaded(),
+		);
+	}
+
+	private _onSaveLoaded() {
+		if (this._history.length === 0) return;
+		this._history.clear();
+		this._showNotice(
+			this._t("ui.charts.lost.saveLoaded").replace(
+				"{0}",
+				formatClock(Date.now(), false),
+			),
+		);
+		if (this._settings.recording) this._sample();
+		this.render();
 	}
 
 	/**
@@ -258,24 +280,6 @@ export class ChartsTab {
 			const calendarYear = this._catalog.calendarYear();
 			const playedYears = this._catalog.playedYears();
 			const history = this._history;
-			const length = history.length;
-			// A reset or loading an older save takes the calendar back by whole
-			// years. Smaller wobbles are not a reason to throw history away.
-			if (
-				0 < length &&
-				(calendarYear < history.calendarYear[length - 1] - 1 ||
-					playedYears < history.playedYears[length - 1] - 0.01)
-			) {
-				// The game was reset, or an older save was loaded.
-				this._showNotice(
-					this._t("ui.charts.lost.timeWentBackwards")
-						.replace("{0}", formatClock(Date.now(), false))
-						.replace("{1}", history.calendarYear[length - 1].toFixed(1))
-						.replace("{2}", calendarYear.toFixed(1)),
-				);
-				history.clear();
-			}
-
 			const now = Date.now();
 			history.beginSample(now, calendarYear, playedYears);
 			try {
@@ -351,6 +355,10 @@ export class ChartsTab {
 
 	destroy() {
 		this._stopSampling();
+		if (this._saveLoadedHandle !== undefined) {
+			UserScriptLoader.window.dojo.unsubscribe(this._saveLoadedHandle);
+			this._saveLoadedHandle = undefined;
+		}
 		const ui = this._host.game.ui;
 		if (this._originalLoadLog !== undefined) {
 			ui.loadLog = this._originalLoadLog;
