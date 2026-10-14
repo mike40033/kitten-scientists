@@ -26,6 +26,14 @@
 	font-weight: bold;
 }
 
+.notice {
+	font-size: 11px;
+	border: 1px solid gray;
+	border-radius: 4px;
+	padding: 3px 6px;
+	margin: 0 0 6px;
+}
+
 .span {
 	opacity: 0.75;
 }

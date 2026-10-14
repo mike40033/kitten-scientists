@@ -64,6 +64,12 @@ const SORTED_GROUPS: Array<ChartGroup> = ["resources", "production"];
 
 const SETTINGS_KEY = "ks.charts";
 
+/**
+ * Remembers, per browser tab, when the last sample was taken. Survives page
+ * reloads, so we can tell the user why their history is gone.
+ */
+const SESSION_KEY = "ks.charts.lastSample";
+
 export type ChartXAxis = "realTime" | "playedYears" | "calendarYear";
 export type ChartYScale = "linear" | "log";
 export type ChartYMax = "cap" | "allTime" | "visible";
@@ -170,6 +176,7 @@ export class ChartsTab {
 		}
 	>();
 	private _recordToggle: JQuery<HTMLElement> | undefined;
+	private _notice: JQuery<HTMLElement> | undefined;
 	private _pickerSignature = "";
 	private _pickerFilter = "";
 
@@ -191,6 +198,48 @@ export class ChartsTab {
 		this._settings = this._loadSettings();
 		this._catalog = new ChartCatalog(host, this._history);
 		this._buildUi();
+		this._explainLostHistory();
+	}
+
+	/**
+	 * Chart history only lives in memory. If this tab recorded before, and the
+	 * page has since been reloaded, say so, because it is easy to mistake for
+	 * a bug. Browsers also reload background tabs on their own after
+	 * discarding them to save memory.
+	 */
+	private _explainLostHistory() {
+		let lastSample: number | undefined;
+		try {
+			const stored = sessionStorage.getItem(SESSION_KEY);
+			lastSample = stored ? Number(stored) : undefined;
+		} catch (_error: unknown) {
+			return;
+		}
+		if (lastSample === undefined || !Number.isFinite(lastSample)) return;
+
+		const discarded =
+			(document as Document & { wasDiscarded?: boolean }).wasDiscarded === true;
+		this._showNotice(
+			this._t(
+				discarded ? "ui.charts.lost.discarded" : "ui.charts.lost.reloaded",
+			).replace("{0}", formatClock(lastSample, false)),
+		);
+	}
+
+	private _showNotice(text: string) {
+		console.info(...cl(`Charts: ${text}`));
+		this._notice
+			?.empty()
+			.append(
+				$("<span/>").text(`${text} `),
+				$("<a/>", { href: "#" })
+					.text("✕")
+					.on("click", (event) => {
+						event.preventDefault();
+						this._notice?.hide();
+					}),
+			)
+			.show();
 	}
 
 	private _t(key: Parameters<KittenScientists["engine"]["i18n"]>[0]) {
@@ -216,14 +265,22 @@ export class ChartsTab {
 					playedYears < history.playedYears[length - 1] - 0.01)
 			) {
 				// The game was reset, or an older save was loaded.
-				console.info(
-					...cl("Charts: game time went backwards. Clearing history."),
+				this._showNotice(
+					this._t("ui.charts.lost.timeWentBackwards")
+						.replace("{0}", formatClock(Date.now(), false))
+						.replace("{1}", history.calendarYear[length - 1].toFixed(1))
+						.replace("{2}", calendarYear.toFixed(1)),
 				);
 				history.clear();
 			}
 
 			const now = Date.now();
 			history.beginSample(now, calendarYear, playedYears);
+			try {
+				sessionStorage.setItem(SESSION_KEY, String(now));
+			} catch (_error: unknown) {
+				// Only used to explain lost history.
+			}
 			for (const definition of this._definitions.values()) {
 				let value = Number.NaN;
 				let cap: number | undefined;
@@ -559,7 +616,8 @@ export class ChartsTab {
 				this._pickerGroups,
 			);
 
-		this._tab.append(controls, plot, this._legend, hint, picker);
+		this._notice = $("<div/>").addClass(styles.notice).hide();
+		this._tab.append(controls, this._notice, plot, this._legend, hint, picker);
 		$("#rightColumn").append(this._tab);
 	}
 
