@@ -401,7 +401,7 @@
 	"ui.charts.tooMany": "Charts can show at most {0} series at once.",
 	"ui.charts.window": "Range",
 	"ui.charts.window.all": "Since load",
-	"ui.charts.window.custom": "Custom",
+	"ui.charts.window.custom": "{0} (zoomed)",
 	"ui.charts.xAxis": "X",
 	"ui.charts.xAxis.calendarYear": "Calendar year",
 	"ui.charts.xAxis.playedYears": "Played years",

@@ -513,16 +513,16 @@ export class ChartsTab {
 				]),
 				["custom", this._t("ui.charts.window.custom")],
 			],
-			WINDOW_PRESETS.some(([, value]) => value === this._settings.window)
-				? String(this._settings.window)
-				: "custom",
+			String(this._settings.window),
 			(value) => {
 				if (value === "custom") return;
 				this._settings.window = value === "null" ? null : Number(value);
+				this._syncWindowSelect();
 				this._storeSettings();
 				this.render();
 			},
 		);
+		this._syncWindowSelect();
 		const yScaleSelect = select(
 			[
 				["linear", this._t("ui.charts.yScale.linear")],
@@ -656,12 +656,33 @@ export class ChartsTab {
 		const current = this._settings.window ?? Math.max(fullSpan, MIN_WINDOW);
 		const next = Math.max(MIN_WINDOW, current * factor);
 		this._settings.window = fullSpan <= next && 1 < factor ? null : next;
-		const preset = WINDOW_PRESETS.find(
-			([, value]) => value === this._settings.window,
-		);
-		this._windowSelect?.val(preset ? String(preset[1]) : "custom");
+		this._syncWindowSelect();
 		this._storeSettings();
 		this.render();
+	}
+
+	/**
+	 * Show the current window in the range select. A window that was set by
+	 * zooming shows up as an extra, unselectable entry naming its span.
+	 */
+	private _syncWindowSelect() {
+		const select = this._windowSelect;
+		if (!select) return;
+		const span = this._settings.window;
+		const isPreset = WINDOW_PRESETS.some(([, value]) => value === span);
+		const custom = select.find('option[value="custom"]');
+		custom
+			.prop("disabled", true)
+			.prop("hidden", isPreset)
+			.text(
+				isPreset || span === null
+					? ""
+					: this._t("ui.charts.window.custom").replace(
+							"{0}",
+							formatDuration(span),
+						),
+			);
+		select.val(isPreset ? String(span) : "custom");
 	}
 
 	private _onToggle(id: string, checked: boolean) {
