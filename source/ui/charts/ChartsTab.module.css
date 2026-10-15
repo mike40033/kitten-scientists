@@ -1,8 +1,17 @@
 .tab {
 	border-top: 1px solid gray;
 	padding-top: 6px;
-	overflow-y: auto;
-	height: 100%;
+	/* The right column reaches past the bottom of the window (the game shifts
+	 * it down), so leave room for the end of the picker to scroll into view. */
+	padding-bottom: 80px;
+}
+
+/* The game gives every right column tab a fixed height and hides what doesn't
+ * fit. Like the log with KS loaded, let the tab grow, and let the right column
+ * (which KS makes scrollable) scroll it into view. */
+:global #rightColumn #ksRightTabCharts {
+	height: auto;
+	overflow-y: visible;
 }
 
 .controls {

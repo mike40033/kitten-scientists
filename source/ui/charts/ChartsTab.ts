@@ -594,9 +594,12 @@ export class ChartsTab {
 				this.render();
 			})
 			.on("wheel", (event) => {
+				// The chart covers much of the right column, so a plain wheel must
+				// keep scrolling the column. Zooming needs Ctrl (or Cmd).
+				const wheel = event.originalEvent as WheelEvent;
+				if (!wheel.ctrlKey && !wheel.metaKey) return;
 				event.preventDefault();
-				const delta = (event.originalEvent as WheelEvent).deltaY;
-				this._zoom(0 < delta ? 1.25 : 0.8);
+				this._zoom(0 < wheel.deltaY ? 1.25 : 0.8);
 			});
 		$(UserScriptLoader.window).on("resize.ksCharts", () => this.render());
 

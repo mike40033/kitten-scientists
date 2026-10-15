@@ -314,7 +314,7 @@
 	"ui.charts.group.time": "Time",
 	"ui.charts.group.trade": "Trade",
 	"ui.charts.group.village": "Village",
-	"ui.charts.hint": "Each series is scaled to its own range (shown in brackets), so lines can be compared by shape. Click a legend entry to put its numbers on the axis, or hover it for a preview. Scroll over the chart to zoom.",
+	"ui.charts.hint": "Each series is scaled to its own range (shown in brackets), so lines can be compared by shape. Click a legend entry to put its numbers on the axis, or hover it for a preview. Hold Ctrl and scroll over the chart to zoom.",
 	"ui.charts.ks.adoreTheGalaxy": "Adored the galaxy",
 	"ui.charts.ks.blackcoin.buy": "Bought blackcoins",
 	"ui.charts.ks.blackcoin.sell": "Sold blackcoins",
